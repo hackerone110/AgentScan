@@ -14,9 +14,9 @@
 
 | 协议 | 识别内容 |
 | --- | --- |
-| MCP Server | Streamable HTTP、HTTP+SSE legacy、工具/资源/提示词列表、认证状态、蜜罐信号 |
-| A2A Agent | Agent Card、skills、interfaces、无认证 JSON-RPC 可达性、私网地址泄露 |
-| LLM 开放接口 | Ollama、vLLM、SGLang、TGI、llama.cpp、Xinference、LiteLLM、FastChat、LocalAI、LM Studio、LMDeploy |
+| MCP Server | Streamable HTTP、HTTP+SSE legacy、工具/资源/提示词列表、认证状态、需认证 MCP Server 的 OAuth 2.0 发现、蜜罐信号 |
+| A2A Agent | Agent Card、skills、interfaces、无认证 JSON-RPC 可达性 |
+| LLM 开放接口 | Ollama、vLLM、SGLang、TGI、llama.cpp、Xinference、LiteLLM、FastChat、LocalAI、LM Studio、LMDeploy 等 25 种推理框架 |
 
 ## 快速开始
 

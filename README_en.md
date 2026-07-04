@@ -14,9 +14,9 @@ Traditional port scanners only tell you "there's an HTTP service here." AgentSca
 
 | Protocol | Identification |
 | --- | --- |
-| MCP Server | Streamable HTTP, HTTP+SSE legacy, tools/resources/prompts listing, auth status, honeypot signals |
-| A2A Agent | Agent Card, skills, interfaces, unauthenticated JSON-RPC reachability, private address leaks |
-| Open LLM APIs | Ollama, vLLM, SGLang, TGI, llama.cpp, Xinference, LiteLLM, FastChat, LocalAI, LM Studio, LMDeploy |
+| MCP Server | Streamable HTTP, HTTP+SSE legacy, tools/resources/prompts listing, auth status, OAuth 2.0 discovery for auth-required MCP servers, honeypot signals |
+| A2A Agent | Agent Card, skills, interfaces, unauthenticated JSON-RPC reachability |
+| Open LLM APIs | Ollama, vLLM, SGLang, TGI, llama.cpp, Xinference, LiteLLM, FastChat, LocalAI, LM Studio, LMDeploy, and 14 more |
 
 ## Quick Start
 
