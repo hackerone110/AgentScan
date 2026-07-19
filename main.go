@@ -257,7 +257,6 @@ OPTIONS:
      --no-color, --Cn          Disable colors
 
    Filter / Debug
-     --include-probable        Include probable agent-discovery matches
      --verbose-raw             Include raw A2A card response in JSON
      -h, --help                Show help
 `
@@ -268,12 +267,6 @@ func a2aCommand() *cli.Command {
 
 func a2aCommandWithAction(action cli.ActionFunc) *cli.Command {
 	flags := append(commonFlags(),
-		&cli.BoolFlag{
-			Name:               "include-probable",
-			Usage:              "Include probable agent-discovery matches",
-			DisableDefaultText: true,
-			Category:           "Filter",
-		},
 		&cli.BoolFlag{
 			Name:               "verbose-raw",
 			Usage:              "Include raw A2A card response in JSON",
@@ -516,6 +509,7 @@ func runA2AAction(c *cli.Context) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	// 召回优先：A2A 探测高召回（含 probable、降级保留 non-a2a），无精确模式开关。
 	_, err := scanner.RunA2AScan(
 		ctx,
 		rawTargets,
@@ -524,7 +518,6 @@ func runA2AAction(c *cli.Context) error {
 		outputPath,
 		format,
 		noColor,
-		c.Bool("include-probable"),
 	)
 	return err
 }

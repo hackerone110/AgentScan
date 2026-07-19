@@ -73,6 +73,7 @@ Common flags:
 --timeout MS             TCP timeout, default 2000ms
 --skip-port-scan         Treat input as already-open host:port
 --proxy URL              socks5/socks4/https/http proxy
+--strict                 A2A precision mode: only high-confidence confirmed cards (default: recall-first, keeps probable / non-A2A discoveries)
 -o, --output FILE        Write JSON; A2A/LLM auto-append _a2a.json / _llm.json
 -v, --verbose            Show probe details
 ```

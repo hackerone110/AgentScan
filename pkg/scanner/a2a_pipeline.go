@@ -18,15 +18,14 @@ import (
 )
 
 type A2APipeline struct {
-	cfg             models.ScanConfig
-	noColor         bool
-	includeProbable bool
-	probeLabel      string // printed as the stage header in RunFromCandidates
-	onFound         func(*models.A2AServer)
+	cfg        models.ScanConfig
+	noColor    bool
+	probeLabel string // printed as the stage header in RunFromCandidates
+	onFound    func(*models.A2AServer)
 }
 
-func NewA2APipeline(cfg models.ScanConfig, noColor bool, includeProbable bool, onFound func(*models.A2AServer)) *A2APipeline {
-	return &A2APipeline{cfg: cfg, noColor: noColor, includeProbable: includeProbable, probeLabel: "[3/3] a2a probe   ", onFound: onFound}
+func NewA2APipeline(cfg models.ScanConfig, noColor bool, onFound func(*models.A2AServer)) *A2APipeline {
+	return &A2APipeline{cfg: cfg, noColor: noColor, probeLabel: "[3/3] a2a probe   ", onFound: onFound}
 }
 
 func (p *A2APipeline) Run(ctx context.Context, targets []target.Target) []*models.A2AServer {
@@ -172,11 +171,8 @@ func a2aCandidateTimeout(cfg models.ScanConfig) time.Duration {
 }
 
 func (p *A2APipeline) analyzeCandidate(ctx context.Context, c HTTPCandidate) *models.A2AServer {
-	probe := ProbeA2AWithHostname(ctx, c.BaseURL, c.Hostname, c.URLPath, p.cfg.TimeoutMCPMs, p.includeProbable, p.cfg.Dict)
+	probe := ProbeA2AWithHostname(ctx, c.BaseURL, c.Hostname, c.URLPath, p.cfg.TimeoutMCPMs, p.cfg.Dict)
 	if probe == nil {
-		return nil
-	}
-	if !probe.A2AConfirmed && !p.includeProbable {
 		return nil
 	}
 
@@ -216,7 +212,7 @@ func (p *A2APipeline) analyzeCandidate(ctx context.Context, c HTTPCandidate) *mo
 }
 
 func RunA2AScan(ctx context.Context, rawTargets []string, filePath string,
-	cfg models.ScanConfig, outputPath string, format string, noColor bool, includeProbable bool) ([]*models.A2AServer, error) {
+	cfg models.ScanConfig, outputPath string, format string, noColor bool) ([]*models.A2AServer, error) {
 	if err := netproxy.Configure(cfg.Proxy); err != nil {
 		return nil, fmt.Errorf("proxy: %w", err)
 	}
@@ -284,7 +280,7 @@ func RunA2AScan(ctx context.Context, rawTargets []string, filePath string,
 			output.PrintA2AServer(s, noColor)
 		}
 	}
-	pipeline := NewA2APipeline(cfg, noColor, includeProbable, onFound)
+	pipeline := NewA2APipeline(cfg, noColor, onFound)
 	results := pipeline.Run(ctx, targets)
 	if format == "terminal" || format == "" {
 		output.PrintA2ASummary(results, noColor)

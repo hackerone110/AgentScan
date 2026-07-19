@@ -214,13 +214,27 @@ var HTTPSPorts = map[int]bool{
 
 // A2ACardPaths A2A agent card 发现路径列表。
 //
-//   - /.well-known/agent-card.json: A2A spec 标准路径（官方规范）
-//   - /.well-known/agent.json:      A2A legacy 路径（早期实现）
-//   - /agent.json:                  根路径变体（无 .well-known 前缀的极简部署）
+// 顺序即优先级。召回优先：在标准 well-known 路径之外，补充多租户/子路径 mount 与常见变体，
+// 覆盖单端口托管多个 Agent 的部署（Hyperterse /agent/{name}、persona-agent 子应用、
+// C2S single-port multi-A2A 等）。confirmed 判定仍需分数与强 A2A 信号达标。
+// 与 dicts/a2a_paths.txt 保持一致；改动请同步两处。
 var A2ACardPaths = []string{
+	// Tier 1 — 官方标准 well-known
 	"/.well-known/agent-card.json", // A2A spec 标准（官方规范）
 	"/.well-known/agent.json",      // A2A legacy（早期实现）
-	"/agent.json",                  // 根路径变体（极简部署）
+	// Tier 2 — 顶层裸路径
+	"/agent.json",      // 根路径变体（极简部署）
+	"/agent-card.json", // 根路径标准命名变体
+	// Tier 3 — 常见 A2A 子路径 mount 下的 well-known
+	"/a2a/.well-known/agent-card.json",
+	"/a2a/.well-known/agent.json",
+	"/api/a2a/.well-known/agent-card.json",
+	"/api/a2a/.well-known/agent.json",
+	// Tier 4 — 变体命名 / 兜底
+	"/.well-known/a2a.json",
+	"/.well-known/ai-agent.json",
+	"/a2a/agent-card.json",
+	"/a2a/agent.json",
 }
 
 // ── LLM 默认端口 ────────────────────────────────────────────────────────────

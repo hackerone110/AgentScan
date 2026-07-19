@@ -45,6 +45,7 @@ type A2ASkill struct {
 	Name        string   `json:"name,omitempty"`
 	Description string   `json:"description,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
+	Examples    []string `json:"examples,omitempty"`
 	InputModes  []string `json:"input_modes,omitempty"`
 	OutputModes []string `json:"output_modes,omitempty"`
 }

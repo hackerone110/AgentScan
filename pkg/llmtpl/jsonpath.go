@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"unicode"
 )
 
 // jsonGet resolves a simplified dot-path against a parsed JSON value.
@@ -228,14 +227,4 @@ func valueToString(v interface{}) string {
 	default:
 		return fmt.Sprintf("%v", val)
 	}
-}
-
-// isDigit checks if all chars in s are digits.
-func isDigit(s string) bool {
-	for _, r := range s {
-		if !unicode.IsDigit(r) {
-			return false
-		}
-	}
-	return len(s) > 0
 }

@@ -27,6 +27,7 @@ const (
 	colorYellow = "\033[33m"
 	colorGreen  = "\033[32m"
 	colorBold   = "\033[1m"
+	colorDim    = "\033[2m" // 弱化显示：召回优先下的 probable / non-a2a 结果
 )
 
 // PrintServer prints one MCP server finding as a compact terminal block.

@@ -167,6 +167,9 @@ func buildUnifiedA2AServersLang(results []*models.A2AServer, zh bool) []unifiedA
 			statusClass = "pill status-danger"
 		case models.A2AExposureAuthRequired, models.A2AExposureDisabled:
 			statusClass = "pill status-warning"
+		case models.A2AExposureProbable, models.A2AExposureNonA2ADiscovery:
+			// 召回优先噪声：弱化样式，与高置信结果区分
+			statusClass = "pill status-muted"
 		}
 		servers = append(servers, unifiedA2AServer{
 			Target:           fmt.Sprintf("%s:%d%s", r.IP, r.Port, r.CardPath),
@@ -356,6 +359,7 @@ const sharedCSS = `
     .status-danger { background: #fee4e2; color: var(--danger); }
     .status-warning { background: #fef0c7; color: var(--warning); }
     .status-neutral { background: #e4e7ec; color: var(--neutral); }
+    .status-muted { background: #f2f4f7; color: #98a2b3; font-weight: 550; }
     details { margin-top: 12px; padding: 0; }
     summary { cursor: pointer; padding: 13px 16px; font-weight: 650; }
     .detail-body { padding: 0 16px 16px; }

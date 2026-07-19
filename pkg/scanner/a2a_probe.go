@@ -19,7 +19,9 @@ import (
 
 const (
 	a2aConfirmedThreshold = 0.65
-	a2aProbableThreshold  = 0.45
+	// a2aProbableThreshold 召回优先：0.35（原 0.45）。confirmed 仍需 0.65 保证可信，
+	// probable 兜底 recall，让弱信号卡片也不漏。
+	a2aProbableThreshold = 0.35
 )
 
 type A2AProbeResult struct {
@@ -43,6 +45,7 @@ type A2AProbeResult struct {
 	NoAuth           bool
 	AuthRequired     bool
 	EndpointDisabled bool
+	HasSignatures    bool // card 是否声明 signatures（JWS）；仅记录存在性，不做验证
 	RawCard          json.RawMessage
 	Evidence         models.A2AEvidence
 	ResponseTimeMs   float64
@@ -58,7 +61,7 @@ type a2aCardScore struct {
 
 // ProbeA2AWithHostname 探测 A2A Agent Card
 // dict 为字典集合；传 nil 时使用 config.DefaultDictSet()。
-func ProbeA2AWithHostname(ctx context.Context, baseURL, hostname, urlPath string, timeoutMs int, includeProbable bool, dict *config.DictSet) *A2AProbeResult {
+func ProbeA2AWithHostname(ctx context.Context, baseURL, hostname, urlPath string, timeoutMs int, dict *config.DictSet) *A2AProbeResult {
 	if dict == nil {
 		dict = config.DefaultDictSet()
 	}
@@ -76,10 +79,10 @@ func ProbeA2AWithHostname(ctx context.Context, baseURL, hostname, urlPath string
 		}
 
 		score := scoreA2ACard(cardPath, contentType, headers, data)
-		if len(score.negatives) > 0 {
-			continue
-		}
-		if !score.confirmed && !(includeProbable && score.score >= a2aProbableThreshold) {
+		// 召回优先：negative（疑似非 A2A，如 ACP/OpenAPI/plugin）不再直接丢弃。
+		// 若分数达到 probable 阈值，降级保留并标注为 non_a2a_agent_discovery，让用户自行判断。
+		hasNegatives := len(score.negatives) > 0
+		if !score.confirmed && score.score < a2aProbableThreshold {
 			continue
 		}
 
@@ -87,12 +90,19 @@ func ProbeA2AWithHostname(ctx context.Context, baseURL, hostname, urlPath string
 		if !score.confirmed {
 			profile = models.A2AProfileProbable
 		}
+		exposureStatus := exposureStatusForCard(profile)
+		if hasNegatives {
+			// negative 命中时永不 confirmed，覆盖为非 A2A 发现状态。
+			profile = models.A2AProfileProbable
+			exposureStatus = models.A2AExposureNonA2ADiscovery
+			score.confirmed = false
+		}
 
 		result := &A2AProbeResult{
 			CardPath:         cardPath,
 			CardURL:          cardURL,
 			Profile:          profile,
-			ExposureStatus:   exposureStatusForCard(profile),
+			ExposureStatus:   exposureStatus,
 			A2AConfirmed:     score.confirmed,
 			FingerprintScore: score.score,
 			Signals:          score.signals,
@@ -104,6 +114,7 @@ func ProbeA2AWithHostname(ctx context.Context, baseURL, hostname, urlPath string
 			Provider:         mapField(data, "provider"),
 			Capabilities:     extractA2ACapabilities(data),
 			Skills:           extractA2ASkills(data),
+			HasSignatures:    hasA2ASignatures(data),
 			RawCard:          raw,
 			ResponseTimeMs:   elapsed,
 			Evidence: models.A2AEvidence{
@@ -275,6 +286,16 @@ func scoreA2ACard(cardPath, contentType string, headers map[string]string, data 
 		return s
 	}
 
+	// 召回优先：放宽 confirmed 的路径门控。
+	// 标准 well-known 路径照旧按后缀确认；此外，任何路径只要分数达标且具备强 A2A 信号
+	// （protocol=="A2A" / supportedInterfaces / A2A-Version 头）也确认，覆盖多租户子路径 mount。
+	strongA2ASignal := strings.EqualFold(stringField(data, "protocol"), "A2A") ||
+		hasA2ABinding(data) ||
+		headers["A2A-Version"] != ""
+	if _, ok := data["supportedInterfaces"].([]interface{}); ok {
+		strongA2ASignal = true
+	}
+
 	if strings.HasSuffix(cardPath, "/agent-card.json") && s.score >= a2aConfirmedThreshold {
 		s.profile = models.A2AProfileAgentCard
 		s.confirmed = true
@@ -283,6 +304,12 @@ func scoreA2ACard(cardPath, contentType string, headers map[string]string, data 
 	if strings.HasSuffix(cardPath, "/agent.json") && s.score >= a2aConfirmedThreshold {
 		s.profile = models.A2AProfileLegacyAgentJSON
 		s.confirmed = true
+		return s
+	}
+	if strongA2ASignal && s.score >= a2aConfirmedThreshold {
+		s.profile = models.A2AProfileAgentCard
+		s.confirmed = true
+		s.signals = append(s.signals, "nonstandard_card_path")
 		return s
 	}
 	if s.score >= a2aProbableThreshold {
@@ -300,6 +327,17 @@ func hasA2ACapabilityKey(data map[string]interface{}) bool {
 		if _, ok := caps[key]; ok {
 			return true
 		}
+	}
+	return false
+}
+
+// hasA2ASignatures 判断 card 是否声明 signatures（JWS）。仅记录存在性，不做验证。
+func hasA2ASignatures(data map[string]interface{}) bool {
+	switch sigs := data["signatures"].(type) {
+	case []interface{}:
+		return len(sigs) > 0
+	case map[string]interface{}:
+		return len(sigs) > 0
 	}
 	return false
 }
@@ -333,6 +371,11 @@ func a2aNegativeSignals(data map[string]interface{}) []string {
 	}
 	if data["openapi"] != nil || data["swagger"] != nil {
 		out = append(out, "openapi_like")
+	}
+	// ACP（Agent Communication Protocol）与 A2A 长期共享 /.well-known/agent.json。
+	// agentId + runs（REST run 语义）是 ACP 特征，标注为疑似非 A2A（召回优先下降级保留而非丢弃）。
+	if data["agentId"] != nil && data["runs"] != nil {
+		out = append(out, "acp_like")
 	}
 	if data["api"] != nil && data["auth"] != nil && data["schema_version"] != nil {
 		out = append(out, "chatgpt_plugin_like")
@@ -377,6 +420,7 @@ func extractA2ASkills(data map[string]interface{}) []models.A2ASkill {
 			Name:        stringField(m, "name"),
 			Description: stringField(m, "description"),
 			Tags:        stringSliceField(m, "tags"),
+			Examples:    stringSliceField(m, "examples"),
 			InputModes:  stringSliceField(m, "inputModes"),
 			OutputModes: stringSliceField(m, "outputModes"),
 		}
@@ -557,7 +601,14 @@ func probeA2AInterfaces(ctx context.Context, client *http.Client, result *A2APro
 
 func shouldProbeA2AJSONRPC(item models.A2AInterface) bool {
 	binding := strings.ToUpper(item.Binding)
-	return binding == "JSONRPC" || strings.EqualFold(item.Binding, "unknown-jsonrpc-candidate")
+	// 召回优先：除 JSON-RPC 外，也主动探测 HTTP+JSON/REST 及未知 binding
+	// （awesome-a2a 显示官方 SDK 普遍 multi-transport，quad-transport 实现常见）。
+	// 探测使用只读 unknown-method 请求，保持 read-only 边界不变。
+	switch binding {
+	case "JSONRPC", "HTTP+JSON", "HTTP-JSON", "REST", "UNKNOWN", "":
+		return true
+	}
+	return strings.EqualFold(item.Binding, "unknown-jsonrpc-candidate")
 }
 
 func probeA2AJSONRPCInterface(ctx context.Context, client *http.Client, item *models.A2AInterface, version string) {
@@ -640,6 +691,19 @@ func extractA2AExposureSignals(result *A2AProbeResult, extra []string) []string 
 	}
 	if result.Profile == models.A2AProfileAgentCard {
 		add("official_agent_card")
+	}
+	// 召回优先：negative 命中（疑似非 A2A）时把原因作为可解释信号带出，便于用户过滤。
+	if result.ExposureStatus == models.A2AExposureNonA2ADiscovery {
+		add("non_a2a_agent_discovery")
+		for _, neg := range result.Negatives {
+			add(neg)
+		}
+	}
+	if containsA2ASignal(result.Signals, "nonstandard_card_path") {
+		add("nonstandard_card_path")
+	}
+	if result.HasSignatures {
+		add("has_jws_signature")
 	}
 	if boolLike(result.Capabilities.PushNotifications) {
 		add("push_notifications_true")
@@ -908,6 +972,16 @@ func hasSystemAdminSkill(skills []models.A2ASkill) bool {
 func containsAnyWord(text string, words []string) bool {
 	for _, word := range words {
 		if containsWord(text, word) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsA2ASignal 判断信号切片是否包含指定值。
+func containsA2ASignal(signals []string, want string) bool {
+	for _, s := range signals {
+		if s == want {
 			return true
 		}
 	}

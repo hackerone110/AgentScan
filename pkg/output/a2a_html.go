@@ -120,7 +120,20 @@ func buildA2ASummaryText(results []*models.A2AServer) string {
 	fmt.Fprintf(&b, "Endpoint disabled: %d\n", s.EndpointDisabled)
 	fmt.Fprintf(&b, "Private host advertised: %d\n", s.PrivateHostAdvertised)
 	fmt.Fprintf(&b, "Probable discoveries: %d\n", s.ProbableAgentDiscoveries)
+	fmt.Fprintf(&b, "Non-A2A discoveries: %d\n", s.NonA2ADiscoveries)
 	fmt.Fprintf(&b, "Total skills: %d\n", s.TotalSkills)
+
+	clusters := multiDeploymentClusters(results)
+	if len(clusters) > 0 {
+		fmt.Fprintf(&b, "\nTop product families (deployments >= 2):\n")
+		for _, c := range clusters {
+			ver := ""
+			if c.Version != "" {
+				ver = " v" + c.Version
+			}
+			fmt.Fprintf(&b, "  %d x  %s%s  (no-auth=%d, e.g. %s)\n", c.Count, c.ProductName, ver, c.NoAuthCount, c.SampleTarget)
+		}
+	}
 	return b.String()
 }
 

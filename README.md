@@ -73,6 +73,7 @@ agentscan llm    # 只扫 LLM 开放接口
 --timeout MS             TCP 超时，默认 2000ms
 --skip-port-scan         输入视为已开放的 host:port
 --proxy URL              socks5/socks4/https/http 代理
+--strict                 A2A 精确模式：只输出高置信 confirmed 卡片（默认召回优先，保留 probable / 疑似非 A2A）
 -o, --output FILE        写 JSON；A2A/LLM 自动写 _a2a.json / _llm.json
 -v, --verbose            显示探测详情
 ```

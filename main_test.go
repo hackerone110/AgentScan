@@ -199,7 +199,6 @@ func TestA2ACommandParsesFlagsAfterTargets(t *testing.T) {
 		"--skip-port-scan",
 		"--proxy", "socks4://127.0.0.1:1080",
 		"--a2a-threads", "17",
-		"--include-probable",
 		"--verbose-raw",
 		"--target", "flagged.example",
 	}
@@ -211,7 +210,7 @@ func TestA2ACommandParsesFlagsAfterTargets(t *testing.T) {
 	if got.Format != "json" || got.Output != "a2a.json" {
 		t.Fatalf("format/output = %q/%q, want json/a2a.json", got.Format, got.Output)
 	}
-	if !got.SkipPortScan || !got.IncludeProbable || !got.VerboseRaw {
+	if !got.SkipPortScan || !got.VerboseRaw {
 		t.Fatalf("boolean flags not parsed: %#v", got)
 	}
 	if got.Proxy != "socks4://127.0.0.1:1080" {
@@ -260,14 +259,13 @@ func parseCLIForTest(t *testing.T, args []string) parsedCLI {
 }
 
 type parsedA2ACLI struct {
-	Targets         []string
-	Output          string
-	Format          string
-	SkipPortScan    bool
-	IncludeProbable bool
-	VerboseRaw      bool
-	A2AThreads      int
-	Proxy           string
+	Targets      []string
+	Output       string
+	Format       string
+	SkipPortScan bool
+	VerboseRaw   bool
+	A2AThreads   int
+	Proxy        string
 }
 
 func parseA2ACLIForTest(t *testing.T, args []string) parsedA2ACLI {
@@ -276,14 +274,13 @@ func parseA2ACLIForTest(t *testing.T, args []string) parsedA2ACLI {
 	var parsed parsedA2ACLI
 	capture := func(c *cli.Context) error {
 		parsed = parsedA2ACLI{
-			Targets:         append(c.StringSlice("target"), c.Args().Slice()...),
-			Output:          c.String("output"),
-			Format:          c.String("format"),
-			SkipPortScan:    c.Bool("skip-port-scan"),
-			IncludeProbable: c.Bool("include-probable"),
-			VerboseRaw:      c.Bool("verbose-raw"),
-			A2AThreads:      c.Int("a2a-threads"),
-			Proxy:           c.String("proxy"),
+			Targets:      append(c.StringSlice("target"), c.Args().Slice()...),
+			Output:       c.String("output"),
+			Format:       c.String("format"),
+			SkipPortScan: c.Bool("skip-port-scan"),
+			VerboseRaw:   c.Bool("verbose-raw"),
+			A2AThreads:   c.Int("a2a-threads"),
+			Proxy:        c.String("proxy"),
 		}
 		return nil
 	}

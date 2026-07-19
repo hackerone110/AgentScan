@@ -1,5 +1,27 @@
 # A2A Agent Card 发现路径
-# 顺序即优先级：标准路径在前，非标准路径在后
+# 顺序即优先级：标准路径在前，非标准/兜底路径在后
+#
+# 召回优先：在标准 well-known 路径之外，补充多租户/子路径 mount 与常见变体，
+# 覆盖单端口托管多个 Agent 的部署（Hyperterse /agent/{name}、persona-agent 子应用、
+# C2S single-port multi-A2A 等）。confirmed 判定仍需分数与强 A2A 信号达标，扩路径
+# 只提升发现面，不降低确认可信度。
+
+# Tier 1 — 官方标准 well-known 路径
 /.well-known/agent-card.json
 /.well-known/agent.json
+
+# Tier 2 — 顶层裸路径（legacy / 简化部署常见）
 /agent.json
+/agent-card.json
+
+# Tier 3 — 常见 A2A 子路径 mount 下的 well-known
+/a2a/.well-known/agent-card.json
+/a2a/.well-known/agent.json
+/api/a2a/.well-known/agent-card.json
+/api/a2a/.well-known/agent.json
+
+# Tier 4 — 变体命名 / 兜底
+/.well-known/a2a.json
+/.well-known/ai-agent.json
+/a2a/agent-card.json
+/a2a/agent.json

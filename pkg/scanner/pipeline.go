@@ -497,7 +497,8 @@ func RunScan(ctx context.Context, rawTargets []string, filePath string,
 				output.PrintA2AServer(s, noColor)
 			}
 		}
-		a2aPipeline := NewA2APipeline(a2aCfg, noColor, false, a2aOnFound)
+		// 召回优先：A2A 探测高召回（含 probable、降级保留 non-a2a），无精确模式开关。
+		a2aPipeline := NewA2APipeline(a2aCfg, noColor, a2aOnFound)
 		a2aPipeline.probeLabel = "--- A2A probe    "
 		a2aResults = a2aPipeline.RunFromCandidates(ctx, candidates)
 		if format == "terminal" || format == "" {
