@@ -340,11 +340,15 @@ func (p *Pipeline) analyzeCandidate(ctx context.Context, c HTTPCandidate) *model
 	var resourceTemplates []models.MCPResourceTemplate
 	var prompts []models.MCPPrompt
 
-	if probe.Transport == models.TransportHTTPSSELegacy {
+	switch probe.Transport {
+	case models.TransportHTTPSSELegacy:
 		// SSE legacy：单次 session 枚举四类，避免四次独立握手
 		tools, resources, resourceTemplates, prompts = EnumerateAllSSELegacy(ctx, c.BaseURL, probe.Endpoint, c.Hostname, p.cfg.TimeoutMCPMs, p.cfg.DelayMs)
-	} else {
-		// Streamable HTTP：共享 client，四路并行枚举
+	case models.TransportStreamableHTTPModern:
+		// 2026-07-28 无状态：无握手、无 session，请求带 _meta + 必需头
+		tools, resources, resourceTemplates, prompts = EnumerateAllStreamableModern(ctx, c.BaseURL, probe.Endpoint, c.Hostname, p.cfg.TimeoutMCPMs, p.cfg.DelayMs)
+	default:
+		// Streamable HTTP（legacy session-based）：共享 client，四路并行枚举
 		tools, resources, resourceTemplates, prompts = EnumerateAllStreamable(ctx, c.BaseURL, probe.Endpoint, probe.MessagePath, probe.SessionID, c.Hostname, p.cfg.TimeoutMCPMs, p.cfg.DelayMs)
 	}
 

@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agentscan/agentscan/internal/mcpwire"
 	"github.com/agentscan/agentscan/internal/sseutil"
 	"github.com/agentscan/agentscan/pkg/config"
 	"github.com/agentscan/agentscan/pkg/models"
@@ -145,6 +146,90 @@ func EnumeratePrompts(ctx context.Context, baseURL, endpoint, messagePath, sessi
 		return nil
 	}
 	return extractPrompts(data)
+}
+
+// ── Modern 无状态枚举（2026-07-28 transport） ────────────────────────────────
+
+// EnumerateAllStreamableModern 在 2026-07-28 无状态 Streamable HTTP 上枚举
+// tools、resources、resource templates、prompts。
+// 与 legacy 版本的区别：无 initialize 握手、无 notifications/initialized、无 session，
+// 每个请求自带 params._meta（协议版本）与必需头 MCP-Protocol-Version + Mcp-Method。
+func EnumerateAllStreamableModern(ctx context.Context, baseURL, endpoint, hostname string, timeoutMs int, delayMs int) ([]models.MCPTool, []models.MCPResource, []models.MCPResourceTemplate, []models.MCPPrompt) {
+	timeout := time.Duration(timeoutMs) * time.Millisecond
+	client := buildHTTPClient(hostname, timeout)
+	postURL := baseURL + endpoint
+
+	var (
+		tools     []models.MCPTool
+		resources []models.MCPResource
+		templates []models.MCPResourceTemplate
+		prompts   []models.MCPPrompt
+	)
+
+	if delayMs > 0 {
+		scanDelay(delayMs)
+		tools = extractTools(modernRequest(ctx, client, postURL, "list-tools", "tools/list"))
+		scanDelay(delayMs)
+		resources = extractResources(modernRequest(ctx, client, postURL, "list-resources", "resources/list"))
+		scanDelay(delayMs)
+		templates = extractResourceTemplates(modernRequest(ctx, client, postURL, "list-restpl", "resources/templates/list"))
+		scanDelay(delayMs)
+		prompts = extractPrompts(modernRequest(ctx, client, postURL, "list-prompts", "prompts/list"))
+		return tools, resources, templates, prompts
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		tools = extractTools(modernRequest(ctx, client, postURL, "list-tools", "tools/list"))
+	}()
+	go func() {
+		defer wg.Done()
+		resources = extractResources(modernRequest(ctx, client, postURL, "list-resources", "resources/list"))
+	}()
+	go func() {
+		defer wg.Done()
+		templates = extractResourceTemplates(modernRequest(ctx, client, postURL, "list-restpl", "resources/templates/list"))
+	}()
+	go func() {
+		defer wg.Done()
+		prompts = extractPrompts(modernRequest(ctx, client, postURL, "list-prompts", "prompts/list"))
+	}()
+	wg.Wait()
+	return tools, resources, templates, prompts
+}
+
+// modernRequest 发送一个 2026-07-28 无状态 JSON-RPC 请求并返回解析后的响应。
+// body 携带 params._meta；HTTP 头设置必需的 MCP-Protocol-Version + Mcp-Method
+// （值与 body 对齐，否则服务器 400 HeaderMismatch）。
+func modernRequest(ctx context.Context, client *http.Client, postURL, id, method string) map[string]interface{} {
+	body := mcpwire.ModernRequest(id, method, nil)
+	req, err := http.NewRequestWithContext(ctx, "POST", postURL, bytes.NewReader(body))
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("User-Agent", config.UserAgent)
+	req.Header.Set("MCP-Protocol-Version", mcpwire.ModernProtocolVersion)
+	req.Header.Set("Mcp-Method", method)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil
+	}
+	ct := resp.Header.Get("Content-Type")
+	if strings.Contains(ct, "text/event-stream") {
+		return sseutil.ParseFirstMessage(resp.Body)
+	}
+	var data map[string]interface{}
+	json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&data) //nolint:errcheck
+	return data
 }
 
 // ── SSE Legacy 枚举（2024-11-05 transport） ───────────────────────────────────
