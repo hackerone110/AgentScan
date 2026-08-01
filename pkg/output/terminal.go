@@ -111,6 +111,8 @@ func transportLabel(t models.Transport) string {
 	switch t {
 	case models.TransportStreamableHTTP:
 		return "streamable-http"
+	case models.TransportStreamableHTTPModern:
+		return "streamable-http-2026"
 	case models.TransportHTTPSSELegacy:
 		return "sse-legacy"
 	default:

@@ -13,6 +13,10 @@ type Transport string
 const (
 	TransportStreamableHTTP Transport = "streamable_http"
 	TransportHTTPSSELegacy  Transport = "http_sse_legacy"
+	// TransportStreamableHTTPModern 是 2026-07-28 修订的无状态 Streamable HTTP：
+	// 无 initialize 握手、无 Mcp-Session-Id，通过 server/discover 探活，
+	// 版本/身份/能力携带在请求 params._meta 中。
+	TransportStreamableHTTPModern Transport = "streamable_http_modern"
 )
 
 // MCPTool 单个工具定义

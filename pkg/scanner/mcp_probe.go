@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -98,6 +99,14 @@ func ProbeMCPWithHostname(ctx context.Context, baseURL, hostname, urlPath string
 				strings.HasSuffix(ep, "/sse/")
 
 			if !isKnownSSEPath {
+				// 先试 2026-07-28 modern（server/discover）：纯 modern 服务器不认 initialize，
+				// 只有 discover 能探到。命中即返回，不再尝试 legacy。
+				if r := tryStreamableHTTPModern(probeCtx, client, url, ep, timeout, dict.MCPAuthPaths); r != nil {
+					r.Endpoint = ep
+					resultCh <- result{r, priority}
+					return
+				}
+				// 回退 legacy streamable（2025-06-18 initialize）。
 				r := tryStreamableHTTP(probeCtx, client, url, ep, timeout, dict.MCPAuthPaths)
 				if r != nil {
 					r.Endpoint = ep
@@ -414,6 +423,176 @@ func tryStreamableHTTP(ctx context.Context, client *http.Client, url, endpoint s
 	}
 }
 
+// tryStreamableHTTPModern 尝试 2026-07-28 无状态 Streamable HTTP 探活。
+// 发送 server/discover（modern 服务器唯一 MUST 实现的 RPC），带必需请求头
+// MCP-Protocol-Version + Mcp-Method，头值与 body 的 _meta 对齐。
+//
+// 存活判定：
+//   - 200 + DiscoverResult（supportedVersions/resultType/_meta.serverInfo）→ 无认证存活
+//   - 400 + 现代错误码(-32020/-32022 等) → 存活的 modern MCP（版本/头问题，非认证）
+//   - 401/403 或 RFC 9728 OAuth 挑战 → 存活但需认证
+func tryStreamableHTTPModern(ctx context.Context, client *http.Client, url, endpoint string, timeout time.Duration, authPaths map[string]bool) *ProbeResult {
+	probeCtx, cancel := context.WithTimeout(ctx, streamableProbeTimeout(timeout))
+	defer cancel()
+
+	body := mcpwire.DiscoverRequest()
+	req, err := http.NewRequestWithContext(probeCtx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	req.Header.Set("User-Agent", config.UserAgent)
+	// 2026-07-28 必需头：值须与 body 对齐，否则服务器 400 HeaderMismatch。
+	req.Header.Set("MCP-Protocol-Version", mcpwire.ModernProtocolVersion)
+	req.Header.Set("Mcp-Method", "server/discover")
+
+	start := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	elapsed := float64(time.Since(start).Milliseconds())
+	headers := relevantHeaders(resp.Header)
+
+	if resp.StatusCode != 200 {
+		// 读一次 body：既用于现代错误码判定，也传给 auth 判定，避免重复消费。
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		bodyStr := string(body)
+		modernCode := bodyModernErrorCode(bodyStr)
+
+		// 明确的认证挑战优先：需 MCP 佐证的 401/403，或带 resource_metadata 的 WWW-Authenticate。
+		// 注意：-32020/-32022（头/版本不匹配）是存活证据而非认证证据，不能当作 auth。
+		if isModernAuthChallenge(resp, modernCode) {
+			return &ProbeResult{
+				Transport:        models.TransportStreamableHTTPModern,
+				FingerprintScore: 0.5,
+				NoAuth:           false,
+				AuthRequired:     true,
+				ResponseTimeMs:   elapsed,
+				Evidence: models.MCPEvidence{
+					URL:             url,
+					Transport:       models.TransportStreamableHTTPModern,
+					ResponseHeaders: headers,
+					JSONRPC: models.JSONRPCSummary{
+						RequestMethod: "server/discover",
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Header.Get("Content-Type"),
+					},
+					Fingerprint: models.FingerprintEvidence{
+						Score:   0.5,
+						Signals: []string{"auth_required_mcp_signals"},
+					},
+					Auth:           models.AuthEvidence{Status: "auth-required", Reasons: []string{"server/discover returned an auth challenge"}},
+					ResponseTimeMs: elapsed,
+				},
+			}
+		}
+		// 非认证 4xx：现代错误码即存活证据（无认证，只是请求参数/版本不合服务器意）。
+		if modernCode != "" {
+			return &ProbeResult{
+				Transport:        models.TransportStreamableHTTPModern,
+				FingerprintScore: 0.5,
+				NoAuth:           true,
+				AuthRequired:     false,
+				ResponseTimeMs:   elapsed,
+				Evidence: models.MCPEvidence{
+					URL:             url,
+					Transport:       models.TransportStreamableHTTPModern,
+					ResponseHeaders: headers,
+					JSONRPC: models.JSONRPCSummary{
+						RequestMethod: "server/discover",
+						StatusCode:    resp.StatusCode,
+						ContentType:   resp.Header.Get("Content-Type"),
+						HasError:      true,
+						ErrorCode:     modernCode,
+					},
+					Fingerprint: models.FingerprintEvidence{
+						Score:   0.5,
+						Signals: []string{"modern_error_code_" + modernCode},
+					},
+					Auth:           models.AuthEvidence{Status: "no-auth", Reasons: []string{"server/discover returned a modern MCP JSON-RPC error " + modernCode}},
+					ResponseTimeMs: elapsed,
+				},
+			}
+		}
+		return nil
+	}
+
+	ct := resp.Header.Get("Content-Type")
+	var data map[string]interface{}
+	if strings.Contains(ct, "text/event-stream") {
+		data = sseutil.ParseFirstMessage(io.LimitReader(resp.Body, 2<<20))
+	} else {
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&data); err != nil {
+			return nil
+		}
+	}
+	if data == nil {
+		return nil
+	}
+
+	// JSON-RPC-over-HTTP 服务器常把应用层错误放在 HTTP 200 里返回。
+	// 严格的 modern 服务器对空 clientCapabilities / 版本探测会回 200 + -32021/-32022，
+	// 这同样是"服务存活"的零误报证据（MCP 独占保留区），不能被 0.35 门槛丢弃。
+	if code := dataModernErrorCode(data); code != "" {
+		return &ProbeResult{
+			Transport:        models.TransportStreamableHTTPModern,
+			FingerprintScore: 0.5,
+			NoAuth:           true,
+			AuthRequired:     false,
+			ResponseTimeMs:   elapsed,
+			Evidence: models.MCPEvidence{
+				URL:             url,
+				Transport:       models.TransportStreamableHTTPModern,
+				ResponseHeaders: headers,
+				JSONRPC: models.JSONRPCSummary{
+					RequestMethod: "server/discover",
+					StatusCode:    resp.StatusCode,
+					ContentType:   ct,
+					HasError:      true,
+					ErrorCode:     code,
+				},
+				Fingerprint: models.FingerprintEvidence{
+					Score:   0.5,
+					Signals: []string{"modern_error_code_" + code},
+				},
+				Auth:           models.AuthEvidence{Status: "no-auth", Reasons: []string{"server/discover returned a modern MCP JSON-RPC error " + code + " (HTTP 200)"}},
+				ResponseTimeMs: elapsed,
+			},
+		}
+	}
+
+	score, serverName, serverVer, protocolVer, caps, fingerprint := scoreFingerprintDetailed(data)
+	if score < 0.35 {
+		return nil
+	}
+	fingerprint.Score = score
+
+	return &ProbeResult{
+		Transport:        models.TransportStreamableHTTPModern,
+		FingerprintScore: score,
+		ServerName:       serverName,
+		ServerVersion:    serverVer,
+		ProtocolVersion:  protocolVer,
+		Capabilities:     caps,
+		RawResponse:      marshalRaw(data),
+		NoAuth:           true,
+		ResponseTimeMs:   elapsed,
+		Evidence: models.MCPEvidence{
+			URL:             url,
+			Transport:       models.TransportStreamableHTTPModern,
+			ProtocolVersion: protocolVer,
+			ResponseHeaders: headers,
+			JSONRPC:         summarizeJSONRPC("server/discover", resp.StatusCode, resp.Header.Get("Content-Type"), data),
+			Fingerprint:     fingerprint,
+			Auth:            models.AuthEvidence{Status: "no-auth", Reasons: []string{"server/discover returned a valid DiscoverResult without auth challenge"}},
+			ResponseTimeMs:  elapsed,
+		},
+	}
+}
+
 // tryHTTPSSELegacy 旧版 HTTP+SSE（2024-11-05）
 // 正确实现：保持 GET <ssePath> 连接不关闭，并行 POST，从 SSE 流读响应。
 // 这是 SSE legacy 的核心协议要求：session 与连接绑定，断开连接即 session 失效。
@@ -627,8 +806,28 @@ func scoreFingerprintDetailed(data map[string]interface{}) (float64, string, str
 	score := 0.0
 	evidence.Signals = append(evidence.Signals, "jsonrpc_result")
 
-	// protocolVersion 存在 → +0.2
+	// resultType 是 2026-07-28 modern 结果的必备字段，取值只有 "complete" / "input_required"。
+	// 只认这两个合法枚举值，避免任意带 result.resultType 字符串的非 MCP 服务被误判。
+	if rt, _ := result["resultType"].(string); rt == "complete" || rt == "input_required" {
+		score += 0.2
+		evidence.Signals = append(evidence.Signals, "modern_result_type")
+	}
+
+	// 协议版本：legacy 走 result.protocolVersion（单值），
+	// modern DiscoverResult 走 result.supportedVersions（数组，取首个）。
+	// supportedVersions 只取符合 MCP 版本格式（YYYY-MM-DD）的值，避免任意字符串数组凑分。
 	protocolVer, _ := result["protocolVersion"].(string)
+	if protocolVer == "" {
+		if versions, ok := result["supportedVersions"].([]interface{}); ok {
+			for _, v := range versions {
+				if s, _ := v.(string); isMCPVersionString(s) {
+					protocolVer = s
+					evidence.Signals = append(evidence.Signals, "supported_versions")
+					break
+				}
+			}
+		}
+	}
 	if protocolVer != "" {
 		score += 0.2
 		evidence.Signals = append(evidence.Signals, "protocol_version")
@@ -651,9 +850,19 @@ func scoreFingerprintDetailed(data map[string]interface{}) (float64, string, str
 		}
 	}
 
-	// serverInfo 存在 → 额外加分（规范 REQUIRED 字段）
+	// serverInfo：legacy 在 result.serverInfo；
+	// modern DiscoverResult 挪进了 result._meta['io.modelcontextprotocol/serverInfo']。
 	var serverName, serverVer string
-	if si, ok := result["serverInfo"].(map[string]interface{}); ok {
+	si, _ := result["serverInfo"].(map[string]interface{})
+	if si == nil {
+		if meta, ok := result["_meta"].(map[string]interface{}); ok {
+			si, _ = meta["io.modelcontextprotocol/serverInfo"].(map[string]interface{})
+			if si != nil {
+				evidence.Signals = append(evidence.Signals, "meta_server_info")
+			}
+		}
+	}
+	if si != nil {
 		serverName, _ = si["name"].(string)
 		serverVer, _ = si["version"].(string)
 		if serverName != "" {
@@ -799,6 +1008,14 @@ func isMCPAuthRequiredWithEvidence(resp *http.Response, endpoint string, authPat
 			score++
 			evidence.Reasons = append(evidence.Reasons, "JSON-RPC error response")
 		}
+		// 2026-07-28 MCP 独占保留区错误码（-32020/-32021/-32022）：只有 modern MCP
+		// 会返回，等价于 MCP 专有响应头，用于替代 modern 服务器不再发送的 Mcp-Session-Id
+		// 信号。不含 -32601（JSON-RPC 标准 Method not found），避免误判普通 JSON-RPC 服务。
+		if code := bodyModernErrorCode(bodyStr); code != "" {
+			hasMCPHeader = true
+			score += 2
+			evidence.Reasons = append(evidence.Reasons, "modern MCP error code "+code+" (RFC-reserved)")
+		}
 	}
 
 	if (hasJSONRPC && score >= 3) || (hasMCPHeader && hasAuthChallenge) {
@@ -808,4 +1025,104 @@ func isMCPAuthRequiredWithEvidence(resp *http.Response, endpoint string, authPat
 	evidence.Status = "not-auth-required"
 	evidence.Reasons = append(evidence.Reasons, fmt.Sprintf("auth score %d below threshold", score))
 	return false, evidence
+}
+
+// isModernAuthChallenge 判断响应是否为真正的 MCP 认证挑战。
+// 裸 401/403（无任何 MCP 佐证）不足以断定是 MCP——普通 basic-auth 站点、WAF、
+// Cloudflare 都会回 401/403。与 legacy isMCPAuthRequiredWithEvidence 的门槛保持一致，
+// 要求佐证：RFC 9728 OAuth 发现挑战、MCP 专有响应头、或 body 中的 MCP 保留错误码。
+// modernCode 由调用方从已读的 body 中解析传入（避免重复消费 body）。
+func isModernAuthChallenge(resp *http.Response, modernCode string) bool {
+	// RFC 9728：带 resource_metadata 指向 oauth-protected-resource，是 MCP 独有的强信号，
+	// 单独成立（不依赖状态码）。
+	wwwAuth := resp.Header.Get("WWW-Authenticate")
+	if wwwAuth != "" && strings.Contains(wwwAuth, "resource_metadata=") && strings.Contains(wwwAuth, "oauth-protected-resource") {
+		return true
+	}
+	if resp.StatusCode != 401 && resp.StatusCode != 403 {
+		return false
+	}
+	// 裸 401/403：需 MCP 佐证（专有响应头，或 body 中的 MCP 保留错误码）才判为 MCP 认证挑战。
+	if resp.Header.Get("Mcp-Protocol-Version") != "" || resp.Header.Get("Mcp-Session-Id") != "" {
+		return true
+	}
+	if modernCode != "" {
+		return true
+	}
+	return false
+}
+
+// modernMCPErrorCodes 是 2026-07-28 规范在 MCP 独占保留区间（-32020~-32099）
+// 分配的错误码，只有 modern MCP 服务器会返回，可作为零误报的存活指纹。
+//   -32020 HeaderMismatch / -32021 MissingRequiredClientCapability
+//   -32022 UnsupportedProtocolVersion
+// 注意：不含 -32601（Method not found）——它是 JSON-RPC 2.0 标准预定义码，
+// 任何 JSON-RPC 服务器遇到未知方法都会返回，用它做指纹会把普通 JSON-RPC 服务、
+// 以及不认 server/discover 的 legacy MCP 服务器误判为 modern。
+var modernMCPErrorCodes = []string{"-32020", "-32021", "-32022"}
+
+// bodyModernErrorCode 在响应体文本中查找 modern MCP 保留错误码，命中返回该码，否则空串。
+// 匹配后要求紧跟非数字字符（如 , } 空白），避免 -32020 误配 -320201 之类的更长数字。
+func bodyModernErrorCode(body string) string {
+	if !strings.Contains(body, `"error"`) {
+		return ""
+	}
+	for _, code := range modernMCPErrorCodes {
+		for _, prefix := range []string{`"code":` + code, `"code": ` + code} {
+			idx := strings.Index(body, prefix)
+			if idx < 0 {
+				continue
+			}
+			rest := body[idx+len(prefix):]
+			if rest == "" || (rest[0] < '0' || rest[0] > '9') {
+				return code
+			}
+		}
+	}
+	return ""
+}
+
+// dataModernErrorCode 从已解析的 JSON-RPC 响应中提取 error.code，
+// 若属于 MCP 独占保留区错误码则返回该码字符串，否则空串。
+// 用于 HTTP 200 + JSON-RPC error 的场景（错误码在 body 而非 HTTP 状态）。
+func dataModernErrorCode(data map[string]interface{}) string {
+	errObj, ok := data["error"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	code, ok := errObj["code"]
+	if !ok {
+		return ""
+	}
+	var codeStr string
+	switch c := code.(type) {
+	case float64:
+		codeStr = strconv.Itoa(int(c))
+	case string:
+		codeStr = c
+	default:
+		return ""
+	}
+	for _, mc := range modernMCPErrorCodes {
+		if codeStr == mc {
+			return mc
+		}
+	}
+	return ""
+}
+
+// isMCPVersionString 判断字符串是否为 MCP 协议版本格式 YYYY-MM-DD。
+func isMCPVersionString(s string) bool {
+	if len(s) != 10 || s[4] != '-' || s[7] != '-' {
+		return false
+	}
+	for i, r := range s {
+		if i == 4 || i == 7 {
+			continue
+		}
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
